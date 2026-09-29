@@ -1,0 +1,12 @@
+{
+    "name": "mods/alomare/one_click_armor_set",
+    "guid": "49c7cf40-ffe7-45aa-8190-a57e02c6a232",
+    "displayName": "One Click Armor Set",
+    "entry": "one_click_armor_set.lua",
+    "version": "2",
+    "icon": "icon.png",
+    "description": "Adds an EQUIP SET button beside EQUIP in the ship Armory and Character menus: one click equips the matching helmet, armor, cape and player card you own.",
+    "requires": [
+        "Bingus Shared Loader v17 or newer"
+    ]
+}
