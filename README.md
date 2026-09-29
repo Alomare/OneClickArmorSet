@@ -42,4 +42,4 @@ against a game.dll dump, and the set table generator needs FileDiver's kit table
 
 ## Nexus
 
-NEXUS_LINK_PLACEHOLDER
+https://www.nexusmods.com/helldivers2/mods/16713
