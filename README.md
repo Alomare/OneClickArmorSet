@@ -1,3 +1,5 @@
+<img width="1920" height="1080" alt="thumbnail2" src="https://github.com/user-attachments/assets/6449e6c1-6a6a-42cc-9d5f-59251f0a23e2" />
+
 # One Click Armor Set
 
 A Helldivers 2 Lua mod (Bingus Shared Loader) that adds an EQUIP SET button beside EQUIP in the ship Armory and
