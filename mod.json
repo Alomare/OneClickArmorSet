@@ -5,7 +5,7 @@
     "entry": "one_click_armor_set.lua",
     "version": "2",
     "icon": "icon.png",
-    "description": "Adds an EQUIP SET button beside EQUIP in the ship Armory and Character menus: one click equips the matching helmet, armor, cape and player card you own.",
+    "description": "Equip the matching helmet, armor, cape and player card you own for the item you have selected with the press of a button. Filters configurable with Mod Options Menu.",
     "requires": [
         "Bingus Shared Loader v17 or newer"
     ]
