@@ -1,21 +1,33 @@
-"""Offline test of the prototype (release) under LuaJIT: the real game.dll code image (_research/game_25480438.dll,
+"""Offline test of the release under LuaJIT: the real game.dll code image (_research/game_25480438.dll,
 offsets == RVAs) at a fake base, so signatures and native entry points are checked against the game's own code;
-the heap objects (UI manager, offers, the Armory controller with its detail panel and bar) are simulated, and the
-native functions are stand-ins acting on that memory (the commit copies the pending loadout like the real one).
+the heap objects (UI manager, offers, the Armory controller with its detail panel and bar, the Hellpod loadout
+screen, the game's language setting) are simulated, and the native functions are stand-ins acting on that memory
+(the commit copies the pending loadout like the real one).
 
-Run from the mod folder:  python -B research/test_release.py
+The Hellpod loadout screen is placed so that its item browser (screen + 0xd2850) is the Armory's (controller +
+0x7f718): both are the same class, so the same simulated grid, detail panel and bar serve both.
+
+Run from the mod folder:  python -B tests/test_release.py
 """
 import re
+import sys
 import tempfile
 from pathlib import Path
 
 from lupa.luajit21 import LuaRuntime
 
-from crack_kit_names import thin
-
 MOD = Path(__file__).resolve().parents[1]
-SOURCE = (MOD / 'one_click_armor_set.lua').read_text(encoding='utf-8')
-DUMP = MOD.parent / '_research' / 'game_25480438.dll'
+ROOT = MOD.parents[1]
+sys.path.insert(0, str(MOD / 'research'))
+sys.path.insert(0, str(ROOT / 'tools'))
+from crack_kit_names import thin  # noqa: E402
+import signatures  # noqa: E402
+import sigspec  # noqa: E402
+from entry import entry_text  # noqa: E402
+
+MAIN = (MOD / 'one_click_armor_set.lua').read_text(encoding='utf-8')
+SOURCE = entry_text(MOD, 'one_click_armor_set.lua')  # what ships: the texts ahead of the script
+DUMP = ROOT / '_research' / 'game_25480438.dll'
 
 HARNESS = r'''
 local logdir, image = ...
@@ -58,6 +70,7 @@ function fake.u32(a) local v = ffi.new('uint32_t[1]'); ffi.copy(v, read_mem(a, 4
 function fake.f32(a) local v = ffi.new('float[1]'); ffi.copy(v, read_mem(a, 4), 4); return tonumber(v[0]) end
 function fake.i16(a) local v = ffi.new('int16_t[1]'); ffi.copy(v, read_mem(a, 2), 2); return tonumber(v[0]) end
 local function patch(rva, bytes) patches[#patches + 1] = {BASE + rva, bytes} end
+fake.patch = patch
 local k32 = {
     GetCurrentProcess = function() return nil end,
     GetModuleHandleA = function() return ffi.cast('void *', BASE) end,
@@ -85,7 +98,9 @@ local k32 = {
 local NATIVE_BY_RVA = {[0x144cfb0] = 'set_visible', [0x143bf90] = 'set_label', [0x143c950] = 'set_string_arg',
                        [0x143a0f0] = 'clear_args', [0x1919250] = 'bar_empty', [0x14476a0] = 'set_position',
                        [0x1447160] = 'set_size', [0x1455a90] = 'commit', [0x1448690] = 'set_color',
-                       [0x1327f50] = 'play_sound', [0x18d0210] = 'equip_sound', [0x18d10d0] = 'mark_equipped', [0x191a720] = 'button_state', [0x18d7210] = 'preview_notify', [0x1448ad0] = 'set_opacity', [0x14476a0] = 'set_position', [0xfd97e0] = 'entity_event', [0x1450230] = 'set_image', [0x143eef0] = 'set_uv', [0x1447160] = 'set_size', [0x18d1280] = 'highlight', [0x12f9540] = 'find_mapping', [0xaba910] = 'glyph_texture', [0xae47b0] = 'key_name', [0x144f160] = 'set_anchor', [0x144f0d0] = 'set_pivot', [0x14498c0] = 'set_variable', [0x14491f0] = 'set_layer'}
+                       [0x1327f50] = 'play_sound', [0x18d0210] = 'equip_sound', [0x18d10d0] = 'mark_equipped', [0x191a720] = 'button_state', [0x18d7210] = 'preview_notify', [0x1448ad0] = 'set_opacity', [0x14476a0] = 'set_position', [0xfd97e0] = 'entity_event', [0x1450230] = 'set_image', [0x143eef0] = 'set_uv', [0x1447160] = 'set_size', [0x18d1280] = 'highlight', [0x12f9540] = 'find_mapping', [0xaba910] = 'glyph_texture', [0xae47b0] = 'key_name', [0x144f160] = 'set_anchor', [0x144f0d0] = 'set_pivot', [0x14498c0] = 'set_variable', [0x14491f0] = 'set_layer',
+                       [0x875cd0] = 'set_helmet', [0x8760b0] = 'set_body', [0x875ec0] = 'set_cape',
+                       [0x876ed0] = 'set_card'}
 LOC_FN, LOC_TEXT = 0x26000000, 0x26100000
 local function cast(ct, v)
     if ct == 'const char *(*)(uint32_t)' then
@@ -115,6 +130,11 @@ local function cast(ct, v)
                 fake.glyph_query = string.format('%d %d %d', kind, key, extra)
                 out[0] = fake.glyph_tex or 0
                 return out
+            end
+        elseif name == 'set_helmet' or name == 'set_body' or name == 'set_cape' or name == 'set_card' then
+            return function(profile, player, item)
+                fake.natives[#fake.natives + 1] = string.format('%s %x %d %x', name, tonumber(profile), tonumber(player),
+                                                                tonumber(item))
             end
         elseif name == 'key_name' then
             return function(kind, key, xbox)
@@ -195,6 +215,38 @@ fake.option_values = {}
 ModOptionsMenu = {api = 1, register_option = function(id, spec)
         fake.registered = (fake.registered or '') .. id .. '=' .. spec.label .. ';'; return true end,
     get = function(id) local v = fake.option_values[id]; if v == nil then return true end; return v end}
+-- The game's Text Language setting (bingus_text's reading): [settings] + 705500 + 212 = index into 15 language
+-- records at game.dll + 0x37c5650, each with its code string at +8.
+SETTINGS, LANGS = 0x2a000000, 0x2b000000
+heap[SETTINGS] = string.rep('\0', 705500 + 256)
+heap[LANGS] = string.rep('\0', 0x400)
+patch(0x3326340, le64(SETTINGS))
+for i, code in ipairs({'us', 'bp', 'ms', 'tc'}) do  -- the game's codes for Brazilian Portuguese, Latin American Spanish, Traditional Chinese
+    patch(0x37c5650 + 8 * (i - 1), le64(LANGS + i * 0x40))
+    fake.put(LANGS + i * 0x40 + 8, le64(LANGS + i * 0x40 + 0x20))
+    fake.put(LANGS + i * 0x40 + 0x20, code .. '\0')
+end
+function fake.language(index) fake.put32(SETTINGS + 705500 + 212, index) end
+fake.language(0)
+-- The Hellpod loadout screen (see the docstring): stack type 11 with the screen at +0xb0; local index +0x27d0,
+-- category +0x2818; the local player's block at +0x10 (helmet +0x124, cape +0x128, body +0x12c); the profile.
+STACK, PROFILE = 0x2c000000, 0x2d000000
+SCREEN = CTL + 0x7f718 - 0xd2850
+heap[STACK] = string.rep('\0', 0x100)
+heap[SCREEN] = string.rep('\0', CTL - SCREEN)
+heap[PROFILE] = string.rep('\0', 0x10)
+patch(0x347ce38, le64(STACK)); patch(0x33264f8, le64(PROFILE))
+function fake.open_hellpod(category)
+    fake.put32(STACK, 11); fake.put(STACK + 0xb0, le64(SCREEN))
+    fake.put32(SCREEN + 0x27d0, 0); fake.put32(SCREEN + 0x2818, category or 3)
+end
+function fake.close_hellpod() fake.put32(STACK, 0) end
+function fake.block(o) return fake.u32(SCREEN + 0x10 + o) end
+-- The settings object's saved loadout (the player card at +0x168). The card table is the dump's own (static data).
+SAVED = 0x2e000000
+heap[SAVED] = string.rep('\0', 0x200)
+patch(0x347cdd8, le64(SAVED))
+function fake.saved_card() return fake.u32(SAVED + 0x168) end
 
 patch(0x3326e68, le64(MGR)); patch(0x347cef8, le64(PROG))
 ROOT = 0x25000000
@@ -293,7 +345,9 @@ def check(cond, what):
 
 def main():
     for pattern in (r'//', r'\bgoto\b', r'&(?!&)', r'~(?!=)', r'<<', r'>>'):
-        check(not re.search(pattern, SOURCE.split('\n', 1)[1]), f'no Lua 5.3+ construct {pattern!r}')
+        check(not re.search(pattern, MAIN.split('\n', 1)[1]), f'no Lua 5.3+ construct {pattern!r}')
+    check(not sigspec.check(MOD / 'one_click_armor_set.lua', sigspec.build(signatures.SPECS)),
+          'the script carries the current signatures and signature engine')
     logdir = Path(tempfile.mkdtemp(prefix='esb_proto_'))
     lua = LuaRuntime(unpack_returned_tuples=True)
     lua.execute(HARNESS, str(logdir), DUMP.read_bytes())
@@ -311,9 +365,21 @@ def main():
 
     f.frames(5)
     status = (logdir / 'OneClickArmorSet_STATUS.log').read_text(encoding='utf-8')
-    check(status.startswith('OK - One Click Armor Set') and 'native functions: OK' in status
-          and 'set table: 417 items' + chr(10) in status,
-          'globals and native functions verified against the real code:\n' + status)
+    check(status.startswith('OK - One Click Armor Set') and 'game code: OK' + chr(10) in status
+          and 'EQUIP SET in the Hellpod loadout: OK' in status and 'key glyph on the button: OK' in status
+          and 'player card in the Hellpod loadout: OK' in status
+          and '3D preview refresh after EQUIP SET: OK' in status and 'set table: 417 items' + chr(10) in status,
+          'globals and native functions found in the real code:\n' + status)
+    t = lua.globals().OneClickArmorSet._test
+    v = t['values']
+    check(v.armory_browser == 0x7f718 and v.browser_grid == 0x6d0 and v.browser_detail == 0x99d70
+          and v.hellpod_browser == 0xd2850 and v.pending_helmet == 0x124 and v.set_body == 0x8760b0,
+          'browser layout and Hellpod pieces read from the code')
+    short = t.short_name
+    check([short(n) for n in ('CW-22 KODIAK', 'AF-02 HAZ-MASTER', 'CE-101 GUERILLA GORILLA ', 'IX-VOIDWALKER',
+                              'B-01 TACTICAL', 'TR-7 AMBASSADOR OF THE BRAND', 'КОМПЛЕКТ')]
+          == ['KODIAK', 'HAZ-MASTER', 'GUERILLA GORILLA', 'IX-VOIDWALKER', 'TACTICAL', 'AMBASSADOR OF THE BRAND',
+              'КОМПЛЕКТ'], 'set names lose their designation only when it is a code like CW-22')
     check(len(f.natives) == 0, 'nothing touched outside the Armory')
 
     lua.execute('fake.open_armory(); fake.view(0x33333333)')
@@ -323,10 +389,10 @@ def main():
     lua.execute('fake.view(0x11111111); fake.put32(DETAIL + 0x20640 + 0xdc0, %d)' % body)
     f.frames(2)
     calls = list(f.natives.values())
-    check(f.text == 'EQUIP RE-2310 HONORARY GUARD SET (4/4)' and 'Bar shown for set RE-2310 Honorary Guard (item %08x: HELMET ARMOR CAPE CARD)' % body in log(),
+    check(f.text == 'EQUIP HONORARY GUARD SET (4/4)' and 'Bar shown (armory) for set RE-2310 Honorary Guard (item %08x: HELMET ARMOR CAPE CARD)' % body in log(),
           'owned warbond armor: EQUIP SET for helmet, armor, cape and card: %r' % f.text)
     check(f.registered == 'alomare.one_click_armor_set.cape=Include Cape;alomare.one_click_armor_set.card=Include Player Card;',
-          'cape and card toggles registered in Mod Options Menu: %r' % f.registered)
+          'cape and card toggles registered in Mod Options Menu (no Hellpod toggle): %r' % f.registered)
     check(f.u32(CTL + BAR + 0x378) & 0x10 and f.u32(CTL + BAR + 0x5e0 + 0x110) == 0xc67c7faf,
           'group shown, #COUNT template set')
     want = []
@@ -356,7 +422,7 @@ def main():
     check(abs(f.f32(CTL + BAR + 12) - 656) < 0.01
           and not any(('size' in c or 'uv' in c) and not any(k in c for k in icons) for c in calls),
           'the bar keeps its full width: %r' % calls[:3])
-    check('engine_root: OK' in status and f.loc_calls is None,
+    check('set names in the game language: OK' in status and f.loc_calls is None,
           'set name in English while the localization lookup is not proven executable')
     check(calls.count('bar_empty %x ' % BAR) == 0, 'no restore while showing')
 
@@ -367,7 +433,7 @@ def main():
     lua.execute('fake.click = nil')
     f.frames(1)
     applied = [f.u32(CTL + 0x38 + o) for o in (0x4, 0x8, 0xc, 0x1c)]
-    check(applied == [helmet, cape, body, card] and 'Equipped set RE-2310 Honorary Guard:' in log() and 'NOT APPLIED' not in log(),
+    check(applied == [helmet, cape, body, card] and 'Equipped set RE-2310 Honorary Guard (armory):' in log() and 'NOT APPLIED' not in log(),
           'click equips helmet, cape, body and card through the commit: %r' % list(f.natives.values()))
 
     calls = list(f.natives.values())
@@ -383,7 +449,7 @@ def main():
           and 'Hover away to 33333333' in log() and 'Hover back to 11111111: ok' in log(),
           'after the equip: a hover away (another set item) and back redresses the model, the bar untouched: %r' % hov)
     check(calls[i - 1] == 'entity_event 1234 bd5b4583 %x' % state and f.u32(state) == 7
-          and 'customization event posted' in log(),
+          and 'Customization event posted' in log(),
           'before the commit: the player\'s customization component bumped (5 -> 7) and its event queued: %r'
           % ((calls[i - 2:i + 1], f.u32(state)),))
     check(calls[i + 1:i + 5] == ['equip_sound 7fde8 11111111', 'mark_equipped 7fde8 11111111',
@@ -391,6 +457,18 @@ def main():
           'after the commit: the item\'s equip sound and the grid\'s equipped marker: %r' % calls[-4:])
     check('set_color %x 1.00,0.85,0.25' % (BAR + 0x5e0) in calls, 'a click flashes the text yellow')
     f.frames(15)
+    check(f.text == 'HONORARY GUARD SET EQUIPPED (4/4)' and 'all on: button disabled' in log()
+          and abs(f.f32(CTL + BAR + 0x5e0 + 0x48) - 0.38) < 0.01,
+          'the whole set on: the button says so, greyed: %r' % f.text)
+    lua.execute('fake.natives = {}; fake.cursor = {1100, 930}'); f.frames(2)
+    lua.execute('fake.click = {1100, 930}'); f.frames(1); lua.execute('fake.click = nil; fake.cursor = nil'); f.frames(2)
+    calls = list(f.natives.values())
+    check(not any(c.startswith(('commit', 'play_sound')) for c in calls) and 'Press ignored: the set is already equipped' in log(),
+          'equipped: no hover sound, a click does nothing: %r' % calls[:4])
+    # Another helmet equipped natively: the set is no longer all on, the button comes back.
+    lua.execute('fake.put32(CTL + 0x38 + 4, 0x12121212); fake.put32(CTL + 0x64 + 4, 0x12121212)'); f.frames(12)
+    check(f.text == 'EQUIP HONORARY GUARD SET (4/4)' and 'no longer all on: button enabled' in log(),
+          'a piece changed: EQUIP SET again: %r' % f.text)
     lua.execute('fake.natives = {}; fake.cursor = {1100, 930}'); f.frames(2)
     lua.execute('fake.cursor = nil'); f.frames(2)
     calls = list(f.natives.values())
@@ -402,14 +480,28 @@ def main():
     # Cape and card switched off in Mod Options Menu: only helmet and armor.
     lua.execute("fake.option_values['alomare.one_click_armor_set.cape'] = false; fake.option_values['alomare.one_click_armor_set.card'] = false")
     lua.execute('fake.put(CTL + 0x64, string.rep("\0", 0x2c)); fake.put(CTL + 0x38, string.rep("\0", 0x2c))')
+    f.frames(12)
+    check(f.text == 'EQUIP HONORARY GUARD SET (2/2)',
+          'options off: the counter leaves the excluded slots out: %r' % f.text)
     lua.execute('fake.click = {1100, 930}'); f.frames(1); lua.execute('fake.click = nil'); f.frames(1)
     applied = [f.u32(CTL + 0x38 + o) for o in (0x4, 0x8, 0xc, 0x1c)]
     check(applied == [helmet, 0, body, 0], 'options off: EQUIP SET equips only helmet and armor: %r' % applied)
-    check(f.text == 'EQUIP RE-2310 HONORARY GUARD SET (2/2)',
-          'options off: the counter leaves the excluded slots out: %r' % f.text)
+    # Two presses within half a second: the second is ignored.
+    lua.execute('fake.put(CTL + 0x64, string.rep("\0", 0x2c)); fake.put(CTL + 0x38, string.rep("\0", 0x2c))')
+    f.frames(40)
+    lua.execute('fake.natives = {}; fake.click = {1100, 930}'); f.frames(1); lua.execute('fake.click = nil'); f.frames(1)
+    f.frames(4)  # past the hover away and back that follows an equip
+    commits = sum(1 for c in f.natives.values() if c.startswith('commit'))
+    lua.execute('fake.put(CTL + 0x64, string.rep("\0", 0x2c)); fake.put(CTL + 0x38, string.rep("\0", 0x2c))')
+    lua.execute('fake.click = {1100, 930}'); f.frames(1); lua.execute('fake.click = nil'); f.frames(1)
+    check(commits == 1 and sum(1 for c in f.natives.values() if c.startswith('commit')) == 1
+          and 'Press ignored: within half a second' in log(), 'a second press within half a second is ignored')
+    f.frames(40)
     lua.execute("fake.option_values = {}")
     f.frames(5)
     # Unapplied native change: skipped.
+    lua.execute('fake.put(CTL + 0x64, string.rep("\0", 0x2c)); fake.put(CTL + 0x38, string.rep("\0", 0x2c))')
+    f.frames(40)
     lua.execute('fake.put32(CTL + 0x64 + 4, 0x12345678); fake.click = {1100, 930}')
     f.frames(1)
     lua.execute('fake.click = nil; fake.put32(CTL + 0x64 + 4, %d)' % helmet)
@@ -439,23 +531,34 @@ def main():
 
     # The lookup proven executable: the localized name replaces the English one.
     lua.execute("fake.loc_executable = true; fake.loc_strings[0xf3550896] = 'RE-2310 GUARDA DE HONRA'; "
-                "fake.loc_strings[0x1b5b48a1] = 'SALDO INSUFICIENTE'")
+                "fake.language(1); fake.put32(MGR + 0x166c, 0)")
+    f.frames(12)
+    lua.execute('fake.open_armory()')
     lua.execute('fake.offers({{0x11111111, %d, true}, {0x22222222, %d, true}, {%d, %d, true}, {%d, %d, true}, '
                 '{0x33333333, %d, true}, {0x44444444, 2, true}, {0x55555555, 3, true}})'
                 % (body, helmet, cape, cape, card, card, voidwalker))
     f.frames(125)
     lua.execute('fake.view(0x33333333)'); f.frames(2)
     lua.execute('fake.natives = {}; fake.view(%d)' % card); f.frames(2)
-    check(f.text == 'EQUIPAR CONJUNTO RE-2310 GUARDA DE HONRA (4/4)' and 'Language: bp' in log(),
-          'language recognized, localized set name and label: %r' % f.text)
-    lua.execute("fake.loc_strings[0x1b5b48a1] = 'LOW FUNDS'; fake.loc_strings[0xf3550896] = 'RE-2310 HONORARY GUARD'; "
+    check(f.text == 'EQUIPAR CONJUNTO GUARDA DE HONRA (4/4)' and '(game setting bp)' in log(),
+          'the game\'s Text Language (Brazilian Portuguese): localized set name and label: %r' % f.text)
+    # The game's other unmapped codes load their bundles too (tools/entry.py aliases): ms -> es-419, tc -> zh-Hant.
+    for index, code, want in ((2, 'ms', 'EQUIPAR CONJUNTO GUARDA DE HONRA (4/4)'), (3, 'tc', '裝備GUARDA DE HONRA套裝 (4/4)')):
+        lua.execute('fake.language(%d); fake.put32(MGR + 0x166c, 0)' % index); f.frames(12)
+        lua.execute('fake.open_armory()'); f.frames(12)
+        lua.execute('fake.view(0x33333333)'); f.frames(2)
+        lua.execute('fake.view(%d)' % card); f.frames(2)
+        check(f.text == want and 'language %s: 10 of 10 texts translated' % code in log(),
+              'game code %s: its translation loads: %r' % (code, f.text))
+    lua.execute("fake.language(0); fake.loc_strings[0xf3550896] = 'RE-2310 HONORARY GUARD'; "
                 "fake.put32(MGR + 0x166c, 0)")
-    f.frames(2)
-    lua.execute('fake.open_armory()'); f.frames(3)
-    check(f.text == 'EQUIP RE-2310 HONORARY GUARD SET (4/4)' and 'Language: en' in log(),
-          'language switched in the options: detected again when the Armory reopens: %r' % f.text)
-    lua.execute('fake.put(CTL + 0x64, read_mem and "" or ""); fake.click = {1100, 930}')
+    f.frames(12)
+    lua.execute('fake.open_armory()'); f.frames(12)
+    check(f.text == 'EQUIP HONORARY GUARD SET (4/4)' and 'text language en (game setting us)' in log(),
+          'language switched in the options: read again when the Armory reopens: %r' % f.text)
+    lua.execute('fake.click = nil')
     lua.execute('fake.put(CTL + 0x38, string.rep("\\0", 0x2c)); fake.put(CTL + 0x64, string.rep("\\0", 0x2c))')
+    f.frames(40)
     lua.execute('fake.natives = {}; fake.click = {1100, 930}'); f.frames(1); lua.execute('fake.click = nil'); f.frames(1)
     calls = list(f.natives.values())
     check('play_sound 80680c11' in calls and not any(c.startswith('equip_sound') for c in calls)
@@ -535,6 +638,8 @@ def main():
     lua.execute('fake.bind({fake.map(0x43, 0x46)}); fake.natives = {}'); f.frames(12)
     check('Glyph: none, hidden' in log(), 'no pad binding while the pad is in use: no glyph')
     lua.execute('fake.bind({fake.map(0x43, 0x46), fake.map(0x42, 0x12)})'); f.frames(12)
+    lua.execute('fake.put(CTL + 0x64, string.rep("\0", 0x2c)); fake.put(CTL + 0x38, string.rep("\0", 0x2c))')
+    f.frames(40)
     # A press of the binding equips as a click does.
     lua.execute('fake.natives = {}; fake.down = true'); f.frames(1); lua.execute('fake.down = false'); f.frames(1)
     nat = list(f.natives.values())
@@ -564,17 +669,96 @@ def main():
                 '{0x33333333, %d, true}})' % (reformer['b'], reformer['h'], reformer['c'], reformer['c'],
                                                reformer['p'], reformer['p'], voidwalker))
     lua.execute('fake.put32(MGR + 0x166c, 0)'); f.frames(12)
-    lua.execute('fake.open_armory(); fake.view(0x33333333)'); f.frames(3)
+    lua.execute('fake.open_armory(); fake.view(0x33333333)'); f.frames(12)
     lua.execute('fake.text = nil; fake.view(%d)' % reformer['c']); f.frames(3)
-    check(f.text == 'EQUIP BFM-77 REFORMER SET (4/4)',
+    check(f.text == 'EQUIP REFORMER SET (4/4)',
           'a Superstore cape and card joined to their armor by the price-tier rule: %r' % f.text)
     # A hand pairing (warbond page): Liberty's Herald with the FS-05 Marksman players own (v1 had it on an unowned copy).
     lua.execute('fake.offers({{0x62000001, 0xecabadbf, true}, {0x62000002, 0x529efe65, true}, '
                 '{0xd45f0974, 0xd45f0974, true}, {0x33333333, %d, true}})' % voidwalker)
     lua.execute('fake.put32(MGR + 0x166c, 0)'); f.frames(12)
-    lua.execute('fake.open_armory(); fake.view(0x33333333)'); f.frames(3)
+    lua.execute('fake.open_armory(); fake.view(0x33333333)'); f.frames(12)
     lua.execute('fake.text = nil; fake.view(0xd45f0974)'); f.frames(3)
-    check(f.text == 'EQUIP FS-05 MARKSMAN SET (3/3)', 'a paired warbond cape joins the owned armor: %r' % f.text)
+    check(f.text == 'EQUIP MARKSMAN SET (3/3)', 'a paired warbond cape joins the owned armor: %r' % f.text)
+
+    # The Hellpod loadout's armor list: the same bar, the whole set. Helmet, armor and cape go through the loadout
+    # block and the native setters (profile, local player 7, item); the player card (no card list there) through the
+    # card setter with its index in the game's card table (Federation's Embrace: 53), then into the saved loadout.
+    lua.execute('fake.offers({{0x11111111, %d, true}, {0x22222222, %d, true}, {%d, %d, true}, {%d, %d, true}, '
+                '{0x33333333, %d, true}})' % (body, helmet, cape, cape, card, card, voidwalker))
+    lua.execute('fake.put32(MGR + 0x166c, 0)'); f.frames(12)
+    check('Bar restored' in log(), 'the Armory closed')
+    lua.execute('fake.view(0x33333333); fake.open_hellpod(3)'); f.frames(12)
+    lua.execute('fake.text = nil; fake.view(0x11111111)'); f.frames(3)
+    check(f.text == 'EQUIP HONORARY GUARD SET (4/4)' and 'Hellpod armor list open' in log()
+          and 'Bar shown (hellpod) for set RE-2310 Honorary Guard (item %08x: HELMET ARMOR CAPE CARD)' % body in log(),
+          'Hellpod armor list: EQUIP SET for helmet, armor, cape and card: %r' % f.text)
+    f.frames(40)
+    lua.execute('fake.natives = {}; fake.click = {1100, 930}'); f.frames(1); lua.execute('fake.click = nil'); f.frames(1)
+    calls = list(f.natives.values())
+    sets = [c for c in calls if c.split(' ')[0] in ('set_helmet', 'set_body', 'set_cape', 'set_card')]
+    check(sets == ['set_helmet 2d000000 7 %x' % helmet, 'set_body 2d000000 7 %x' % body, 'set_cape 2d000000 7 %x' % cape,
+                   'set_card 2d000000 7 35']
+          and (f.block(0x124), f.block(0x128), f.block(0x12c)) == (helmet, cape, body) and f.saved_card() == card
+          and not any(c.startswith('commit') for c in calls) and 'Equipped set RE-2310 Honorary Guard (hellpod)' in log()
+          and 'CARD %08x ok' % card in log(),
+          'Hellpod: each piece into the loadout block and its native setter, the card by its table index into the '
+          'card setter and the saved loadout: %r' % sets)
+    check('equip_sound 7fde8 11111111' in calls and 'mark_equipped 7fde8 11111111' in calls,
+          'Hellpod: the browser grid plays the equip sound and marks the item')
+    f.frames(15)
+    check(f.text == 'HONORARY GUARD SET EQUIPPED (4/4)', 'Hellpod: equipped state from the loadout block and the '
+          'saved card: %r' % f.text)
+    # Another card saved (changed in the Armory): the set is no longer all on.
+    lua.execute('fake.put32(SAVED + 0x168, 0x12345678)'); f.frames(15)
+    check(f.text == 'EQUIP HONORARY GUARD SET (4/4)', 'Hellpod: another saved card makes the set equippable again: %r'
+          % f.text)
+    # Include Player Card off: the Hellpod set leaves the card out, as the Armory does.
+    lua.execute("fake.option_values['alomare.one_click_armor_set.card'] = false"); f.frames(15)
+    check(f.text == 'HONORARY GUARD SET EQUIPPED (3/3)', 'Hellpod: Include Player Card off leaves the card out: %r'
+          % f.text)
+    lua.execute('fake.option_values = {}'); f.frames(15)
+    # Leaving the armor lists (the screen stays): the bar goes back to the game.
+    lua.execute('fake.natives = {}; fake.put32(SCREEN + 0x2818, 10)'); f.frames(12)
+    check('Bar restored (left the armor lists)' in log() and ('bar_empty %x ' % BAR) in list(f.natives.values()),
+          'Hellpod: switching to another category restores the bar')
+    # The Hellpod toggle is gone: a value saved by 3-recon-1 doesn't hide the bar.
+    lua.execute("fake.option_values['alomare.one_click_armor_set.hellpod'] = false; fake.put32(SCREEN + 0x2818, 3)")
+    lua.execute('fake.text = nil'); f.frames(24)
+    check(f.text is not None, 'Hellpod: an old Hellpod toggle value is ignored, the bar shows: %r' % f.text)
+    lua.execute("fake.option_values = {}; fake.close_hellpod()"); f.frames(12)
+
+    # The card code missing (the saved-loadout store changed), or the two card tables disagreeing: only the Hellpod's
+    # card is off, the rest runs (the Hellpod set is 3/3 again).
+    for case, rva, bytes_ in (('card code missing', 0x103daac, '\x90\x90'), ('card tables disagree', 0x103da5e, '\x59')):
+        lua3 = LuaRuntime(unpack_returned_tuples=True)
+        logdir3 = Path(tempfile.mkdtemp(prefix='ocas_card_'))
+        lua3.execute(HARNESS, str(logdir3), DUMP.read_bytes())
+        lua3.execute('fake.patch(%d, "%s")' % (rva, ''.join('\\%d' % ord(c) for c in bytes_)))
+        lua3.execute('fake.offers({{0x11111111, %d, true}, {0x22222222, %d, true}, {%d, %d, true}, {%d, %d, true}})'
+                     % (body, helmet, cape, cape, card, card))
+        lua3.execute(SOURCE)
+        f3 = lua3.globals().fake
+        f3.frames(120)
+        status3 = (logdir3 / 'OneClickArmorSet_STATUS.log').read_text(encoding='utf-8')
+        lua3.execute('fake.view(0x33333333); fake.open_hellpod(3)'); f3.frames(12)
+        lua3.execute('fake.text = nil; fake.view(0x11111111)'); f3.frames(3)
+        check(status3.startswith('OK - ') and 'EQUIP SET in the Hellpod loadout: OK' in status3
+              and 'player card in the Hellpod loadout: OFF' in status3 and f3.text == 'EQUIP HONORARY GUARD SET (3/3)',
+              '%s: only the Hellpod card is off (%r):\n%s' % (case, f3.text, status3))
+
+    # Version 2 texts (Mod Options Menu v1.1 / Mod Bindings Menu v2.1): functions in the game's language.
+    lua2 = LuaRuntime(unpack_returned_tuples=True)
+    logdir2 = Path(tempfile.mkdtemp(prefix='ocas_v2_'))
+    lua2.execute(HARNESS, str(logdir2), DUMP.read_bytes())
+    lua2.execute('ModOptionsMenu.version = 2; ModOptionsMenu.register_option = function(id, spec) '
+                 'fake.spec = fake.spec or spec; return true end')
+    lua2.execute(SOURCE)
+    f2 = lua2.globals().fake
+    f2.frames(12)
+    spec = f2.spec
+    check(spec and callable(spec.label) and spec.label() == 'Include Cape' and spec.mod() == 'One Click Armor Set',
+          'Mod Options Menu v1.1: option texts passed as functions')
     check('Error' not in log(), 'no errors')
     print('%d/%d passed' % (sum(results), len(results)))
     return all(results)
