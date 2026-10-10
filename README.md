@@ -40,3 +40,7 @@ Research notes: [NOTES.md](NOTES.md). Release notes: [CHANGELOG.md](CHANGELOG.md
 - The Armory research builds on tyrypyrking's [HD2-Transmog](https://github.com/tyrypyrking/HD2-Transmog).
 - Kit data from [FileDiver](https://github.com/xypwn/filediver).
 - Developed with Claude Opus 5.5 and the [HD2 Lua Mod Skill](https://github.com/MrChengl11/hd2-lua-mod-skill).
+
+## License
+
+Copyright (C) 2026 Alomare. Licensed under the [GNU General Public License v3.0 or later](LICENSE): you're free to use, study, change and share this mod, and anything you distribute that includes or changes its code must use the same license and come with its source. `src/bingus_text.lua` is CowboyBingus's, under the Zero-Clause BSD license.
