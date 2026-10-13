@@ -200,7 +200,36 @@ local function cast(ct, v)
     end
     return real_ffi.cast(ct, v)
 end
-package.loaded.ffi = setmetatable({load = function() return k32 end, cast = cast}, {__index = real_ffi})
+-- kernel32 as FFI sees it: a call goes through the C declaration of the name it is made by (the shared namespace keeps
+-- the first one; a later ffi.cdef of the name fails), so its arguments are converted, or refused, as in the game. The
+-- stand-ins above are called back through that declaration (JIT off: a callback can't run under a compiled C call).
+require('jit').off()
+local declared, callbacks = {}, {}
+local function cdef(text)
+    real_ffi.cdef(text)
+    local ret, name, params, rest = text:match('^%s*([^;(]-)%s*([%w_]+)%s*(%b())%s*([^;]*);%s*$')
+    if name and not declared[name] then
+        declared[name] = {type = ret .. '(*)' .. params, symbol = rest:match('__asm__%("([%w_]+)"%)') or name}
+    end
+end
+local kernel32 = setmetatable({}, {__index = function(_, name)
+    local d = assert(declared[name], 'missing declaration for symbol ' .. name)
+    callbacks[name] = callbacks[name] or real_ffi.cast(d.type, assert(k32[d.symbol], 'no stand-in for ' .. d.symbol))
+    return callbacks[name]
+end})
+package.loaded.ffi = setmetatable({load = function() return kernel32 end, cast = cast, cdef = cdef}, {__index = real_ffi})
+-- Another mod loaded first declared kernel32's functions under their own names, with other types (a player's log,
+-- 2026-10-10: VirtualQuery with a MEMORY_BASIC_INFORMATION pointer).
+cdef('typedef struct { void *base, *allocation_base; uint32_t allocation_protect; size_t region_size; '
+     .. 'uint32_t state, protect, type; } other_MEMORY_BASIC_INFORMATION;')
+for _, decl in ipairs({'uintptr_t GetCurrentProcess(void);', 'uintptr_t GetModuleHandleA(const char *name);',
+                       'int ReadProcessMemory(uintptr_t process, uintptr_t address, uintptr_t buffer, size_t size, '
+                           .. 'size_t *read);',
+                       'int WriteProcessMemory(uintptr_t process, uintptr_t address, const char *buffer, size_t size, '
+                           .. 'size_t *written);',
+                       'size_t VirtualQuery(const void *address, other_MEMORY_BASIC_INFORMATION *info, size_t size);'}) do
+    cdef(decl)
+end
 stingray = {
     Keyboard = {button_id = function(n) return n end, pressed = function(id) return fake.keys[id] == true end},
     Mouse = {button_id = function() return 1 end, axis_id = function() return 2 end,
@@ -213,8 +242,17 @@ stingray = {
 update = function() end
 fake.option_values = {}
 ModOptionsMenu = {api = 1, register_option = function(id, spec)
-        fake.registered = (fake.registered or '') .. id .. '=' .. spec.label .. ';'; return true end,
-    get = function(id) local v = fake.option_values[id]; if v == nil then return true end; return v end}
+        fake.registered = (fake.registered or '') .. id .. '=' .. spec.label .. ';'
+        fake.defaults = fake.defaults or {}
+        fake.defaults[id] = spec.default
+        if spec.choices then fake.random_mode_choices = table.concat(spec.choices, '|') end
+        return true end,
+    get = function(id)
+        local v = fake.option_values[id]
+        if v == nil then v = (fake.defaults or {})[id] end
+        if v == nil then return true end
+        return v
+    end}
 -- The game's Text Language setting (bingus_text's reading): [settings] + 705500 + 212 = index into 15 language
 -- records at game.dll + 0x37c5650, each with its code string at +8.
 SETTINGS, LANGS = 0x2a000000, 0x2b000000
@@ -368,7 +406,7 @@ def main():
     check(status.startswith('OK - One Click Armor Set') and 'game code: OK' + chr(10) in status
           and 'EQUIP SET in the Hellpod loadout: OK' in status and 'key glyph on the button: OK' in status
           and 'player card in the Hellpod loadout: OK' in status
-          and '3D preview refresh after EQUIP SET: OK' in status and 'set table: 417 items' + chr(10) in status,
+          and '3D preview refresh after EQUIP SET: OK' in status and 'set table: 456 items' + chr(10) in status,
           'globals and native functions found in the real code:\n' + status)
     t = lua.globals().OneClickArmorSet._test
     v = t['values']
@@ -391,8 +429,11 @@ def main():
     calls = list(f.natives.values())
     check(f.text == 'EQUIP HONORARY GUARD SET (4/4)' and 'Bar shown (armory) for set RE-2310 Honorary Guard (item %08x: HELMET ARMOR CAPE CARD)' % body in log(),
           'owned warbond armor: EQUIP SET for helmet, armor, cape and card: %r' % f.text)
-    check(f.registered == 'alomare.one_click_armor_set.cape=Include Cape;alomare.one_click_armor_set.card=Include Player Card;',
-          'cape and card toggles registered in Mod Options Menu (no Hellpod toggle): %r' % f.registered)
+    check(f.registered == 'alomare.one_click_armor_set.cape=Include Cape;alomare.one_click_armor_set.card=Include Player Card;'
+          'alomare.one_click_armor_set.random_mode=Randomization Mode;'
+          'alomare.one_click_armor_set.keep_weight=Keep Armor Weight;' and f.random_mode_choices == 'Whole Sets|Each Piece',
+          'cape and card toggles and the randomization mode registered in Mod Options Menu (no Hellpod toggle): %r'
+          % f.registered)
     check(f.u32(CTL + BAR + 0x378) & 0x10 and f.u32(CTL + BAR + 0x5e0 + 0x110) == 0xc67c7faf,
           'group shown, #COUNT template set')
     want = []
@@ -548,7 +589,7 @@ def main():
         lua.execute('fake.open_armory()'); f.frames(12)
         lua.execute('fake.view(0x33333333)'); f.frames(2)
         lua.execute('fake.view(%d)' % card); f.frames(2)
-        check(f.text == want and 'language %s: 10 of 10 texts translated' % code in log(),
+        check(f.text == want and 'language %s: 17 of 17 texts translated' % code in log(),
               'game code %s: its translation loads: %r' % (code, f.text))
     lua.execute("fake.language(0); fake.loc_strings[0xf3550896] = 'RE-2310 HONORARY GUARD'; "
                 "fake.put32(MGR + 0x166c, 0)")
@@ -574,13 +615,20 @@ def main():
         + chr(9) + '1' + chr(10))
     lua.execute('''CowboyBingusModLoader.log_directory = %r
         fake.down = false
+        fake.bindings = {}
         ModBindingsMenu = {api = 1, register_binding = function(id, label, slot, opts)
-            fake.binding = string.format('%%s|%%s|%%s|%%s', id, label, tostring(slot), opts and opts.category or '')
+            fake.bindings[#fake.bindings + 1] = string.format('%%s|%%s|%%s|%%s', id, label, tostring(slot),
+                                                              opts and opts.category or '')
             return true end,
-            is_down = function(id) return fake.down end}''' % str(logdir).replace(chr(92), '/'))
+            -- fake.down: true for Equip Set, or the id of the binding held down
+            is_down = function(id)
+                return fake.down == id or (fake.down == true and id == 'alomare.one_click_armor_set.equip_set')
+            end}''' % str(logdir).replace(chr(92), '/'))
     lua.execute('fake.view(0x33333333)'); f.frames(12)
-    check(f.binding == 'alomare.one_click_armor_set.equip_set|Equip Set|nil|One Click Armor Set',
-          'binding registered without a slot under the mod category: %r' % f.binding)
+    bindings = list(f.bindings.values())
+    check(bindings == ['alomare.one_click_armor_set.equip_set|Equip Set|nil|One Click Armor Set',
+                       'alomare.one_click_armor_set.randomize|Randomize Armor|nil|One Click Armor Set'],
+          'Equip Set and Randomize Armor registered without a slot under the mod category: %r' % bindings)
     # A key: keyboard mapping (kind 4, device 3), no glyph texture -> keycap with the key's name.
     # EQUIP's mapping says the mouse is in use; the binding has a keyboard key (F) and a pad button (Xbox X).
     lua.execute('fake.mapping = fake.map(0x44, 0x20); fake.bind({fake.map(0x43, 0x46), fake.map(0x42, 0x12)})'
@@ -679,7 +727,7 @@ def main():
     lua.execute('fake.put32(MGR + 0x166c, 0)'); f.frames(12)
     lua.execute('fake.open_armory(); fake.view(0x33333333)'); f.frames(12)
     lua.execute('fake.text = nil; fake.view(0xd45f0974)'); f.frames(3)
-    check(f.text == 'EQUIP MARKSMAN SET (3/3)', 'a paired warbond cape joins the owned armor: %r' % f.text)
+    check(f.text == 'EQUIP MARKSMAN SET (3/4)', 'a warbond page cape joins the owned armor (its card not owned): %r' % f.text)
 
     # The Hellpod loadout's armor list: the same bar, the whole set. Helmet, armor and cape go through the loadout
     # block and the native setters (profile, local player 7, item); the player card (no card list there) through the
@@ -746,6 +794,198 @@ def main():
         check(status3.startswith('OK - ') and 'EQUIP SET in the Hellpod loadout: OK' in status3
               and 'player card in the Hellpod loadout: OFF' in status3 and f3.text == 'EQUIP HONORARY GUARD SET (3/3)',
               '%s: only the Hellpod card is off (%r):\n%s' % (case, f3.text, status3))
+
+    # Randomize Armor: its own binding, in any armor list, as Randomization Mode says.
+    reformer = {'h': 0xede9d6b7, 'b': 0x3412f5e4, 'c': 0x1a0297e0, 'p': 0xcdea8cb2}
+    honorary = {'h': helmet, 'b': body, 'c': cape, 'p': card}
+    lr = LuaRuntime(unpack_returned_tuples=True)
+    logdir_r = Path(tempfile.mkdtemp(prefix='ocas_random_'))
+    lr.execute(HARNESS, str(logdir_r), DUMP.read_bytes())
+    lr.execute('fake.offers({{0x11111111, %d, true}, {0x22222222, %d, true}, {%d, %d, true}, {%d, %d, true}, '
+               '{0x61000001, %d, true}, {0x61000002, %d, true}, {%d, %d, true}, {%d, %d, true}, {0x33333333, %d, true}, '
+               '{0x44444444, 1, true}, {0x71000001, 0x0badcafe, true, 9}})'
+               % (body, helmet, cape, cape, card, card, reformer['b'], reformer['h'], reformer['c'], reformer['c'],
+                  reformer['p'], reformer['p'], voidwalker))
+    lr.execute(SOURCE)
+    lr.execute("""fake.bindings = {}; fake.down = false
+        ModBindingsMenu = {api = 1, register_binding = function(id) fake.bindings[#fake.bindings + 1] = id; return true end,
+                           is_down = function(id) return fake.down == id end}""")
+    fr = lr.globals().fake
+    log_r = lambda: (logdir_r / 'OneClickArmorSet.log').read_text(encoding='utf-8')
+    tr_ = lr.globals().OneClickArmorSet._test
+    applied_r = lambda: dict(zip('hcbp', (fr.u32(lr.eval('CTL') + 0x38 + o) for o in (0x4, 0x8, 0xc, 0x1c))))
+
+    def press(frames_after=1):
+        lr.execute("fake.natives = {}; fake.down = 'alomare.one_click_armor_set.randomize'")
+        fr.frames(1)
+        lr.execute('fake.down = false')
+        fr.frames(frames_after)
+        return list(fr.natives.values())
+
+    fr.frames(5)
+    lr.execute('fake.open_armory(); fake.view(0x11111111)'); fr.frames(12)
+    # The generator's next draw from state 1 is 48271: index 48271 % 2 + 1 = 2 of the sorted keys (BFM-77 Reformer,
+    # RE-2310 Honorary Guard): Honorary Guard.
+    tr_.rng.state = 1
+    calls = press()
+    check(applied_r() == honorary and 'Random set: RE-2310 Honorary Guard, one of 2' in log_r()
+          and 'Equipped random set RE-2310 Honorary Guard (armory)' in log_r()
+          and 'equip_sound 7fde8 11111111' in calls and 'mark_equipped 7fde8 11111111' in calls,
+          'Randomize Armor (whole sets): a set drawn among the owned ones, put on as EQUIP SET does: %r' % calls[:6])
+    fr.frames(40)
+    calls = press(4)
+    check(applied_r() == reformer and 'Random set: BFM-77 Reformer, one of 1' in log_r()
+          and 'mark_equipped 7fde8 61000001' in calls and 'Hover back to 61000001: ok' in log_r(),
+          'the set worn is never drawn; the list lands on the new set\'s piece: %r' % calls[:6])
+    calls = press()
+    check(applied_r() == reformer and 'Randomize ignored: within half a second of the last equip' in log_r()
+          and not any(c.startswith('commit') for c in calls), 'a second press within half a second is ignored')
+    fr.frames(40)
+    # A list of other items (an emote, no slot): nothing put on.
+    lr.execute('fake.put32(CTL + 0x7fde8 + 0x92990, 0x44444444); fake.put32(CTL + 0x7fde8 + 0x92994, 0); '
+               'fake.view(0x44444444)')
+    fr.frames(12)
+    calls = press()
+    check('Randomize ignored: not a helmet, armor, cape or card list' in log_r()
+          and not any(c.startswith('commit') for c in calls), 'a list of other items: nothing put on')
+    # An item outside every set (IX-VOIDWALKER): the kit table still tells its list (helmets).
+    lr.execute('fake.view(0x33333333)'); fr.frames(40)
+    calls = press(10)
+    check(applied_r() == honorary and 'mark_equipped 7fde8 22222222' in calls,
+          'viewing a helmet outside every set: the list is the helmets, the drawn set\'s helmet is marked: %r' % calls[:6])
+    # The cape list with Include Cape off: the drawn set has no piece there; the list's marker and EQUIP stay.
+    lr.execute("fake.option_values['alomare.one_click_armor_set.cape'] = false; fake.view(%d)" % cape)
+    fr.frames(40)
+    calls = press(10)
+    check(applied_r() == {'h': reformer['h'], 'c': cape, 'b': reformer['b'], 'p': reformer['p']}
+          and 'play_sound 80680c11' in calls and not any(c.startswith(('mark_equipped', 'button_state', 'equip_sound'))
+                                                         for c in calls)
+          and 'Hover back to %08x: ok' % cape in log_r(),
+          'a set without a piece in the open list: the viewed item stays, unmarked: %r' % calls[:8])
+    lr.execute('fake.option_values = {}')
+    # Each Piece: every included slot gets another owned item of its kind, sets or not: helmets from the kit table
+    # (IX-VOIDWALKER included), cards from their offer type (0x0badcafe is in no set).
+    lr.execute("fake.option_values['alomare.one_click_armor_set.random_mode'] = 2; fake.view(0x11111111)")
+    lr.execute('fake.put32(CTL + 0x7fde8 + 0x92990, 0x11111111)')
+    fr.frames(40)
+    tr_.rng.state = 1
+    calls = press(10)
+    a = applied_r()
+    check(a['b'] == body and a['c'] == reformer['c'] and a['h'] in (helmet, voidwalker) and a['p'] in (card, 0x0badcafe)
+          and 'Random pieces: HELMET %08x of 2' % a['h'] in log_r()
+          and 'Equipped random set (each piece) (armory)' in log_r() and 'mark_equipped 7fde8 11111111' in calls,
+          'Randomize Armor (each piece): another owned item per slot, sets or not: %r' % {k: '%08x' % v for k, v in a.items()})
+    fr.frames(40)  # past the half second
+    seen = {'h': set(), 'p': set()}
+    for _ in range(8):
+        before = applied_r()
+        press(40)
+        after = applied_r()
+        check_changed = all(after[k] != before[k] for k in 'hbcp')
+        seen['h'].add(after['h']); seen['p'].add(after['p'])
+        if not check_changed:
+            break
+    check(check_changed and voidwalker in seen['h'] and 0x0badcafe in seen['p'],
+          'each piece: every press changes every slot; items outside every set come up (helmets %r, cards %r)'
+          % (sorted('%08x' % i for i in seen['h']), sorted('%08x' % i for i in seen['p'])))
+    lr.execute('fake.option_values = {}')
+    fr.frames(40)
+    # The Hellpod loadout: the drawn set through the loadout block and the native setters.
+    lr.execute('fake.put32(MGR + 0x166c, 0)'); fr.frames(12)
+    lr.execute('fake.view(0x33333333); fake.open_hellpod(3)'); fr.frames(12)
+    lr.execute('fake.view(0x11111111)'); fr.frames(40)
+    calls = press()
+    sets = [c for c in calls if c.split(' ')[0] in ('set_helmet', 'set_body', 'set_cape', 'set_card')]
+    check('Equipped random set' in log_r() and '(hellpod)' in log_r() and len(sets) >= 3,
+          'Hellpod: Randomize Armor puts the set on through the loadout block and setters: %r' % sets)
+    check(list(fr.bindings.values()) == ['alomare.one_click_armor_set.equip_set', 'alomare.one_click_armor_set.randomize']
+          and 'Error' not in log_r(), 'no errors with Randomize Armor')
+
+    # The wiki's sets: the starter cape and card (Foesmasher, Solid Black) shared by every B-01 Tactical copy, each
+    # copy with its own helmet first; DP-00 Tactical with its own cape and the starter card.
+    lw = LuaRuntime(unpack_returned_tuples=True)
+    logdir_w = Path(tempfile.mkdtemp(prefix='ocas_wiki_'))
+    lw.execute(HARNESS, str(logdir_w), DUMP.read_bytes())
+    tactical = {'b': 0x61b31723, 'h': 0x261c4a52}  # the game's default armor and helmet (0x11d9ad0)
+    loose = 0x10707d29  # a B-01 Tactical helmet of no armor copy's dlc_id (shared), sorted before the own helmet
+    other_copy = 0x250fd6c1  # another B-01 Tactical armor copy: viewing a shared piece, the armor worn decides
+    foesmasher, solid_black = 0x4657cfb3, 0x5bdc31e8
+    lw.execute('fake.offers({{0x71000001, %d, true}, {0x71000002, %d, true}, {%d, %d, true}, {%d, %d, true, 9}, '
+               '{0x71000005, %d, true}, {0x71000006, %d, true}, {0x33333333, %d, true}})'
+               % (tactical['b'], tactical['h'], foesmasher, foesmasher, solid_black, solid_black, loose, other_copy,
+                  voidwalker))
+    lw.execute(SOURCE)
+    fw = lw.globals().fake
+    log_w = lambda: (logdir_w / 'OneClickArmorSet.log').read_text(encoding='utf-8')
+    tw = lw.globals().OneClickArmorSet._test
+    check(tw.SETS[foesmasher][1] == '*' and len(list(tw.SETS[foesmasher][3].values())) == 9
+          and tw.SETS[solid_black][1] == '*',
+          'Foesmasher and Solid Black are shared by the 9 B-01 Tactical sets: %r' % (tuple(tw.SETS[foesmasher]),))
+    fw.frames(5)
+    lw.execute('fake.open_armory(); fake.view(0x71000001)'); fw.frames(12)
+    check(fw.text == 'EQUIP TACTICAL SET (4/4)' and 'HELMET ARMOR CAPE CARD' in log_w(),
+          'B-01 Tactical: its own helmet, the starter cape and card: %r' % fw.text)
+    lw.execute('fake.click = {1100, 930}'); fw.frames(1); lw.execute('fake.click = nil'); fw.frames(6)
+    applied = [fw.u32(lw.eval('CTL') + 0x38 + o) for o in (0x4, 0x8, 0xc, 0x1c)]
+    check(applied == [tactical['h'], foesmasher, tactical['b'], solid_black],
+          'EQUIP SET puts on the armor\'s own helmet before a shared one: %r' % ['%08x' % a for a in applied])
+    # Viewing a shared piece: the set of the armor worn.
+    lw.execute('fake.text = nil; fake.view(%d)' % foesmasher); fw.frames(12)
+    check(fw.text == 'TACTICAL SET EQUIPPED (4/4)', 'viewing Foesmasher while wearing B-01 Tactical: its set: %r' % fw.text)
+    dp00 = [i for i, e in tw.SETS.items() if e[1] == 'DP-00 Tactical']
+    check(len(dp00) == 3 and tw.SETS[solid_black][1] == '*'
+          and 'DP-00 Tactical' in list(tw.SETS[solid_black][3].values()),
+          'DP-00 Tactical: its armor, helmet, Veridical Ideology and the shared starter card: %r' % ['%08x' % i for i in dp00])
+
+    # Keep Armor Weight: the class of the armor worn, in both modes.
+    lk = LuaRuntime(unpack_returned_tuples=True)
+    logdir_k = Path(tempfile.mkdtemp(prefix='ocas_weight_'))
+    lk.execute(HARNESS, str(logdir_k), DUMP.read_bytes())
+    # Armor classes from the set table: Honorary Guard (RE-2310) is medium, Obedient (AC-2) light.
+    reformer = {'h': 0x289884f4, 'b': 0x55fd699b, 'c': 0x4260b28c, 'p': 0xbf6672b5}  # AC-2 Obedient, in its place
+    lk.execute('fake.offers({{0x11111111, %d, true}, {0x22222222, %d, true}, {%d, %d, true}, {%d, %d, true}, '
+               '{0x61000001, %d, true}, {0x61000002, %d, true}, {%d, %d, true}, {%d, %d, true}, {0x33333333, %d, true}})'
+               % (body, helmet, cape, cape, card, card, reformer['b'], reformer['h'], reformer['c'], reformer['c'],
+                  reformer['p'], reformer['p'], voidwalker))
+    lk.execute(SOURCE)
+    lk.execute("""fake.down = false
+        ModBindingsMenu = {api = 1, register_binding = function() return true end,
+                           is_down = function(id) return fake.down == id end}""")
+    fk = lk.globals().fake
+    log_k = lambda: (logdir_k / 'OneClickArmorSet.log').read_text(encoding='utf-8')
+    tk = lk.globals().OneClickArmorSet._test
+    cls = tk.class_of
+    check(cls(body) and cls(reformer['b']) and cls(body) != cls(reformer['b']) and cls(helmet) == cls(body),
+          'armor classes: Honorary Guard %s, Reformer %s; a helmet takes its set\'s armor class'
+          % (cls(body), cls(reformer['b'])))
+    fk.frames(5)
+    lk.execute('fake.open_armory(); fake.view(0x11111111)'); fk.frames(12)
+    lk.execute('fake.put32(CTL + 0x64 + 0xc, %d); fake.put32(CTL + 0x38 + 0xc, %d)' % (body, body)); fk.frames(12)
+    lk.execute("fake.option_values['alomare.one_click_armor_set.keep_weight'] = true")
+
+    def press_k():
+        lk.execute("fake.natives = {}; fake.down = 'alomare.one_click_armor_set.randomize'")
+        fk.frames(1)
+        lk.execute('fake.down = false')
+        fk.frames(40)
+
+    press_k()
+    check('Keep Armor Weight: class %s' % cls(body) in log_k()
+          and 'Random set: RE-2310 Honorary Guard, one of 1' in log_k() and 'AC-2 Obedient' not in log_k(),
+          'Keep Armor Weight, whole sets: AC-2 Obedient (light) is never drawn')
+    lk.execute("fake.option_values['alomare.one_click_armor_set.keep_weight'] = false"); press_k()
+    check('Random set: AC-2 Obedient, one of 1' in log_k(), 'without Keep Armor Weight: AC-2 Obedient is drawn')
+    lk.execute('fake.put32(CTL + 0x64 + 0xc, %d); fake.put32(CTL + 0x38 + 0xc, %d)' % (body, body))
+    lk.execute('fake.put32(CTL + 0x64 + 0x4, %d); fake.put32(CTL + 0x38 + 0x4, %d)' % (helmet, helmet)); fk.frames(12)
+    lk.execute("fake.option_values['alomare.one_click_armor_set.keep_weight'] = true; "
+               "fake.option_values['alomare.one_click_armor_set.random_mode'] = 2")
+    press_k()
+    applied = dict(zip('hcbp', (fk.u32(lk.eval('CTL') + 0x38 + o) for o in (0x4, 0x8, 0xc, 0x1c))))
+    check(applied['b'] == body and applied['h'] == helmet and applied['c'] == cape
+          and applied['p'] == card,
+          'Keep Armor Weight, each piece: armor and helmet stay in their class (no other owned), cape and card change: %r'
+          % {k: '%08x' % v for k, v in applied.items()})
+    check('Error' not in log_k() and 'Error' not in log_w(), 'no errors with shared pieces and Keep Armor Weight')
 
     # Version 2 texts (Mod Options Menu v1.1 / Mod Bindings Menu v2.1): functions in the game's language.
     lua2 = LuaRuntime(unpack_returned_tuples=True)

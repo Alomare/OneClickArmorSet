@@ -9,8 +9,9 @@ A Helldivers 2 Lua mod for [Bingus Shared Loader](https://github.com/CowboyBingu
 - In the ship **Armory** and **Character** menus, and in the **Hellpod loadout's** helmet, armor and cape lists, an EQUIP SET button appears when the item you're looking at belongs to a set and you own at least one other piece of it.
 - The button names the set and counts its pieces: **EQUIP KODIAK SET (4/4)**. When every piece is already on it says **KODIAK SET EQUIPPED (4/4)**, greyed out, until something changes.
 - A click (or a [Mod Bindings Menu](https://github.com/CowboyBingus/ModBindingsMenu) key, whose key or gamepad button shows on the button) equips the set the way the game's own EQUIP does: saved like any equip, seen by other players as usual. A press is taken at most every half second.
-- 129 sets, 417 items: every warbond's helmet, armor, cape and player card, Superstore capes and cards matched to their armor, and the first warbonds' capes paired by warbond page.
-- [Mod Options Menu](https://github.com/CowboyBingus/ModOptionsMenu) toggles: include the cape, include the player card (both on by default).
+- 131 sets, 456 items: every warbond page, Superstore set and special set (starter, Liberty Day, anniversary, campaigns) with its helmet, armor, cape and player card.
+- **Randomize Armor**, a second Mod Bindings Menu key: in any of those lists, it puts on a random set you own at least two pieces of, or a random piece per slot.
+- [Mod Options Menu](https://github.com/CowboyBingus/ModOptionsMenu) options: include the cape, include the player card (both on by default), Randomization Mode (Whole Sets or Each Piece) and Keep Armor Weight (random armor of the weight class you wear).
 - The button, the options and the binding follow the game's Text Language.
 
 ## Installation
@@ -23,7 +24,8 @@ The verdict is the first line of `%LOCALAPPDATA%\CowboyBingus\Helldivers2\Logs\O
 
 ## Technical Details
 
-- **Sets.** A table of 129 sets (417 items) is built into the script by `research/build_set_table.py` from the game's customization kit table (dumped with FileDiver): warbond items share developer names (`armor_/helmet_/cape_/banner_warbond_<group>_<n>`), other helmets and armors share a `dlc_id`, Superstore capes and cards are matched to their armor by release order and Super Credits price tier in the offers table, and the first warbonds' capes are paired by warbond page. Set names use the armor's localization key, shown without the designation.
+- **Sets.** A table of 131 sets (456 items) is built into the script by `research/build_set_table.py`: the sets come from the [Helldivers 2 wiki](https://helldivers.wiki.gg) (`research/fetch_wiki.py`: every warbond page, Superstore page and special source), matched by name to the game's customization kits (dumped with FileDiver) and to its player cards (the game's card table names each card through the game's own strings). Pieces several armor copies share (the starter cape and card on every B-01 Tactical) belong to each. Items the wiki doesn't name fall back to the game data rules: developer names, shared `dlc_id`, and the Superstore's release order and price tiers. Set names use the armor's localization key, shown without the designation.
+- **Random armor.** Every kit's slot and weight class is generated with the set table (the class is the armory's: the torso piece's weight; a helmet takes its set's armor class); player cards are found by their offer type at runtime. The draw is uniform, from the mod's own generator.
 - **The item browser.** The Armory controller (found through the UI manager) and the Hellpod loadout screen embed the same item browser class: a grid and a detail panel with EQUIP and a purchase bar. The detail panel holds the viewed offer; the progression offers table maps offers to item ids and tells which items are owned.
 - **The button.** The purchase bar, which the game hides for owned items, is shown and relabeled through the game's own UI functions (visibility, `#COUNT` label, color, images), with EQUIP's outline texture drawn over it; everything is restored when the viewed item changes or the list closes.
 - **Equipping.** In the Armory: the owned set members go into its pending loadout, then the Armory's own commit, as the native EQUIP does. In the Hellpod loadout: each piece goes into the player's loadout block, then the game's own armor setter, as its equip handler does; the player card (the Hellpod has no card list) goes through the game's card setter with its index in the game's card table, then into the saved loadout, as the game's own loadout appliers do. Then the item's equip sound, the grid's equipped marker, and a hover away and back so the 3D preview redresses. "Equipped" compares the set with the applied loadout.
@@ -38,7 +40,7 @@ Research notes: [NOTES.md](NOTES.md). Release notes: [CHANGELOG.md](CHANGELOG.md
 
 - Built on [Bingus Shared Loader](https://github.com/CowboyBingus/BingusSharedLoader), [Mod Options Menu](https://github.com/CowboyBingus/ModOptionsMenu) and [Mod Bindings Menu](https://github.com/CowboyBingus/ModBindingsMenu) by CowboyBingus, whose `bingus_text.lua` provides the translations.
 - The Armory research builds on tyrypyrking's [HD2-Transmog](https://github.com/tyrypyrking/HD2-Transmog).
-- Kit data from [FileDiver](https://github.com/xypwn/filediver).
+- Kit data from [FileDiver](https://github.com/xypwn/filediver); set lists from the [Helldivers 2 wiki](https://helldivers.wiki.gg); armor weight classes checked against SkyeShade's [HD2Runtime](https://github.com/SkyeShade/HD2Runtime).
 - Developed with Claude Opus 5.5 and the [HD2 Lua Mod Skill](https://github.com/MrChengl11/hd2-lua-mod-skill).
 
 ## License
